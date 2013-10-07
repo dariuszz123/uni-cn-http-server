@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 
 // Get file size in bytes
 int get_file_size(char *filename) {
@@ -26,17 +27,19 @@ int get_file_size(char *filename) {
 // send file to client
 void send_file(FILE *client, char *filename) {
     FILE *fp;
-    char buffer[256];
+    int *buf;
 
     fp = fopen(filename, "r");
 
-    while(fgets(buffer, sizeof buffer, fp) != NULL) {
-        fprintf(client, "%s", buffer);
+    while(!feof(fp)) {
+        fread(buf,1,1,fp);
+        fwrite(buf,1,1,client);
     }
 
     fclose(fp);
 }
 
+// guess content type
 char *get_content_type(char *filename) {
 
     char *ext = strrchr(filename, '.');
@@ -53,8 +56,8 @@ char *get_content_type(char *filename) {
         return "text/plain";
     }
 
-    if (strcmp(ext, ".md") == 0) {
-        return "text/markdown";
+    if (strcmp(ext, ".css") == 0) {
+            return "text/css";
     }
 
     if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) {
@@ -72,6 +75,7 @@ char *get_content_type(char *filename) {
     return "text/plain";
 }
 
+// send basic headers
 void send_headers(
     FILE *sock_fd,
     int status_code,
@@ -79,40 +83,76 @@ void send_headers(
     char *content_type,
     int content_length
 ) {
-    fprintf(sock_fd, "HTTP/1.0 %d %s\n", status_code, status_phrase);
-    fprintf(sock_fd, "Content-Type: %s\n", content_type);
-    fprintf(sock_fd, "Content-Length: %d\n", content_length);
-    fprintf(sock_fd, "\n");
+    fprintf(sock_fd, "HTTP/1.0 %d %s\r\n", status_code, status_phrase);
+    fprintf(sock_fd, "Content-Type: %s\r\n", content_type);
+    fprintf(sock_fd, "Content-Length: %d\r\n", content_length);
+    fprintf(sock_fd, "\r\n");
 }
 
-char *get_client_method(FILE *client) {
+// check if file exists
+int file_exists(char *filename) {
+    FILE *file;
+    file = fopen(filename, "r");
+
+    if (file) {
+        fclose(file);
+        return 1;
+    }
+    return 0;
+}
+
+// process client request
+void proccess_request(int fd) {
+    FILE *client;
+    char filename[256];
+    char buffer[256];
+
+    char *line;
     char *method;
-    //int pos;
+    char *path;
+    char *version;
 
-    //method = malloc(64);
+    read(fd, buffer, 255);
 
-    //pos = ftell(client);
+    line = strtok(buffer, "\n");
 
-    //fgets(method, sizeof(method), client);
-    //rewind(client);
-    //fseek(client, pos, SEEK_SET);
-    //sscanf(method, "%s", method);
-    //fprintf(stderr, "%d\n", pos);
+    method = strtok(line, " ");
+    path = strtok(NULL, " ");
+    version = strtok(NULL, " ");
 
-    //rewind(client);
+    client = fdopen(fd, "r+");
 
-    return method;
-}
+    if ((strcmp(method, "GET") == 0) || (strcmp(method, "HEAD") == 0)) {
 
-void proccess_request(FILE *client) {
-    char *filename;
+        strcpy(filename, "public");
 
-    filename = "public/index.html";
+        fprintf(stderr, "Requested: %s\n", path);
 
-    get_client_method(client);
+        if(strcmp(path, "/") == 0) {
+            strcpy(filename, "public/index.html");
+        } else {
+            strcat(filename, path);
+        }
 
-    send_headers(client, 200, "OK", get_content_type(filename), get_file_size(filename));
-    send_file(client, filename);
+        if(file_exists(filename) == 1) {
+            send_headers(client, 200, "OK", get_content_type(filename), get_file_size(filename));
+
+            if (strcmp(method, "GET") == 0) {
+                send_file(client, filename);
+                fprintf(stderr, "File sent [%s]\n", filename);
+            }
+        } else{
+            send_headers(client, 404, "Not Found", "text/plain", 10);
+            fprintf(client, "Not found!");
+            fprintf(stderr, "Requested file not found [%s]\n", filename);
+        }
+
+    } else {
+        send_headers(client, 500, "Unknown Request Method", "text/plain", 24);
+        fprintf(client, "Unknown Request Method!");
+    }
+
+    fflush(client);
 }
 
 int main(int argc, char *argv[])
@@ -130,7 +170,7 @@ int main(int argc, char *argv[])
 
     // no port error
     if (argc < 2) {
-        fprintf(stderr, "ERROR, no port provided\n");
+        fprintf(stderr, "ERROR, no port provided. usage: %s [port]\n", argv[0]);
         exit(1);
     }
 
@@ -186,11 +226,7 @@ int main(int argc, char *argv[])
 
         // child process
         if (pid == 0) {
-            client = fdopen(new_sock_fd, "r+");
-
-            proccess_request(client);
-
-            fflush(client);
+            proccess_request(new_sock_fd);
         }
 
         close(new_sock_fd);
